@@ -2,6 +2,7 @@ import { Route } from '@/types';
 import { parseDate } from '@/utils/parse-date';
 import { config } from '@/config';
 import { connect, Options } from 'puppeteer-real-browser';
+import cache from '@/utils/cache';
 
 export const route: Route = {
     path: '/:section/:type?',
@@ -85,74 +86,84 @@ async function handler(ctx) {
         title += '最新';
     }
 
-    let conn: any | null = null;
+    // Cache the entire fetch operation to reduce requests to Dcard
+    const cacheKey = `dcard:${section}:${type}`;
+    const items = await cache.tryGet(
+        cacheKey,
+        async () => {
+            let conn: any | null = null;
 
-    if (!config.puppeteerRealBrowserService) {
-        conn = await connect(realBrowserOption);
+            if (!config.puppeteerRealBrowserService) {
+                conn = await connect(realBrowserOption);
 
-        setTimeout(async () => {
-            if (conn) {
-                await conn.browser.close();
+                setTimeout(async () => {
+                    if (conn) {
+                        await conn.browser.close();
+                    }
+                }, 60000);
             }
-        }, 60000);
-    }
 
-    try {
-        // Visit the frontend page first to establish session/bypass Cloudflare
-        const html = await getPageWithRealBrowser(link, '.layout_main_2x7k', conn, 30000);
-        if (!html) {
-            if (conn) {
-                await conn.browser.close();
-                conn = null;
+            try {
+                // Visit the frontend page first to establish session/bypass Cloudflare
+                const html = await getPageWithRealBrowser(link, '.layout_main_2x7k', conn, 30000);
+                if (!html) {
+                    if (conn) {
+                        await conn.browser.close();
+                        conn = null;
+                    }
+                    throw new Error('Failed to load Dcard page. Cloudflare may be blocking access.');
+                }
+
+                // Get the API page content
+                const apiHtml = await getPageWithRealBrowser(`${api}&limit=100`, 'body > pre', conn, 30000);
+                if (!apiHtml) {
+                    if (conn) {
+                        await conn.browser.close();
+                        conn = null;
+                    }
+                    throw new Error('Failed to fetch API data.');
+                }
+
+                // Extract JSON from pre tag
+                const preMatch = apiHtml.match(/<pre[^>]*>(.*?)<\/pre>/s);
+                const response = preMatch ? preMatch[1] : apiHtml;
+
+                const data = JSON.parse(response);
+                const items = data.map((item) => ({
+                    title: `「${item.forumName}」${item.title}`,
+                    link: `https://www.dcard.tw/f/${item.forumAlias}/p/${item.id}`,
+                    description: item.excerpt,
+                    author: `${item.school || '匿名'}．${item.gender === 'M' ? '男' : '女'}`,
+                    pubDate: parseDate(item.createdAt),
+                    category: [item.forumName, ...item.topics],
+                    forumAlias: item.forumAlias,
+                    id: item.id,
+                }));
+
+                // Note: ProcessFeed also uses puppeteer, but since we can't easily pass cookies/session
+                // through the service API, we'll keep descriptions as excerpts for now
+                // TO-DO: Enhance to fetch full content if using local connection
+
+                if (conn) {
+                    await conn.browser.close();
+                    conn = null;
+                }
+
+                return items;
+            } catch (error) {
+                if (conn) {
+                    await conn.browser.close();
+                }
+                throw error;
             }
-            throw new Error('Failed to load Dcard page. Cloudflare may be blocking access.');
-        }
+        },
+        10 * 60 // Cache for 10 minutes
+    );
 
-        // Get the API page content
-        const apiHtml = await getPageWithRealBrowser(`${api}&limit=100`, 'body > pre', conn, 30000);
-        if (!apiHtml) {
-            if (conn) {
-                await conn.browser.close();
-                conn = null;
-            }
-            throw new Error('Failed to fetch API data.');
-        }
-
-        // Extract JSON from pre tag
-        const preMatch = apiHtml.match(/<pre[^>]*>(.*?)<\/pre>/s);
-        const response = preMatch ? preMatch[1] : apiHtml;
-
-        const data = JSON.parse(response);
-        const items = data.map((item) => ({
-            title: `「${item.forumName}」${item.title}`,
-            link: `https://www.dcard.tw/f/${item.forumAlias}/p/${item.id}`,
-            description: item.excerpt,
-            author: `${item.school || '匿名'}．${item.gender === 'M' ? '男' : '女'}`,
-            pubDate: parseDate(item.createdAt),
-            category: [item.forumName, ...item.topics],
-            forumAlias: item.forumAlias,
-            id: item.id,
-        }));
-
-        // Note: ProcessFeed also uses puppeteer, but since we can't easily pass cookies/session
-        // through the service API, we'll keep descriptions as excerpts for now
-        // TO-DO: Enhance to fetch full content if using local connection
-
-        if (conn) {
-            await conn.browser.close();
-            conn = null;
-        }
-
-        return {
-            title,
-            link,
-            description: '不想錯過任何有趣的話題嗎？趕快加入我們吧！',
-            item: items,
-        };
-    } catch (error) {
-        if (conn) {
-            await conn.browser.close();
-        }
-        throw error;
-    }
+    return {
+        title,
+        link,
+        description: '不想錯過任何有趣的話題嗎？趕快加入我們吧！',
+        item: items,
+    };
 }
