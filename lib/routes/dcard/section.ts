@@ -3,6 +3,7 @@ import { parseDate } from '@/utils/parse-date';
 import { config } from '@/config';
 import { connect, Options } from 'puppeteer-real-browser';
 import cache from '@/utils/cache';
+import pMap from 'p-map';
 
 export const route: Route = {
     path: '/:section/:type?',
@@ -35,6 +36,18 @@ const realBrowserOption: Options = {
     plugins: [],
 };
 
+function processContent(content: string): string {
+    let body = content;
+    body = body.replaceAll(/https?:\/\/\S+/gi, (url) => {
+        if (/\.(jpe?g|gif|png|webp)([?#]\S*)?$/i.test(url) || /megapx\.dcard\.tw\/v1\/images\//i.test(url)) {
+            return `<img src="${url}">`;
+        }
+        return `<a href="${url}">${url}</a>`;
+    });
+    body = body.replaceAll('\n', '<br>');
+    return body;
+}
+
 async function getPageWithRealBrowser(url: string, selector: string, conn: any | null, timeout = 30000) {
     try {
         if (conn) {
@@ -56,6 +69,29 @@ async function getPageWithRealBrowser(url: string, selector: string, conn: any |
         }
     } catch {
         return '';
+    }
+}
+
+async function fetchApiJson(url: string, conn: any | null, timeout = 15000): Promise<any> {
+    try {
+        if (conn) {
+            const page = await conn.browser.newPage();
+            try {
+                await page.goto(url, { timeout });
+                const text = await page.evaluate(() => document.querySelector('body > pre')?.textContent ?? '');
+                return text ? JSON.parse(text) : null;
+            } finally {
+                await page.close();
+            }
+        } else {
+            const res = await fetch(`${config.puppeteerRealBrowserService}?url=${encodeURIComponent(url)}&selector=${encodeURIComponent('body > pre')}`);
+            const json = await res.json();
+            const text = json.data?.at(0) || '';
+            const preMatch = text.match(/<pre[^>]*>([\s\S]*?)<\/pre>/);
+            return preMatch ? JSON.parse(preMatch[1]) : null;
+        }
+    } catch {
+        return null;
     }
 }
 
@@ -104,18 +140,12 @@ async function handler(ctx) {
             }
 
             try {
-                // Visit the frontend page first to establish session/bypass Cloudflare
-                const html = await getPageWithRealBrowser(link, '.layout_main_2x7k', conn, 30000);
-                if (!html) {
-                    if (conn) {
-                        await conn.browser.close();
-                        conn = null;
-                    }
-                    throw new Error('Failed to load Dcard page. Cloudflare may be blocking access.');
+                // Try API directly first; fallback to homepage visit if blocked
+                let apiHtml = await getPageWithRealBrowser(`${api}&limit=20`, 'body > pre', conn, 30000);
+                if (!apiHtml || !apiHtml.includes('<pre')) {
+                    await getPageWithRealBrowser(link, '.layout_main_2x7k', conn, 30000);
+                    apiHtml = await getPageWithRealBrowser(`${api}&limit=20`, 'body > pre', conn, 30000);
                 }
-
-                // Get the API page content
-                const apiHtml = await getPageWithRealBrowser(`${api}&limit=100`, 'body > pre', conn, 30000);
                 if (!apiHtml) {
                     if (conn) {
                         await conn.browser.close();
@@ -140,16 +170,30 @@ async function handler(ctx) {
                     id: item.id,
                 }));
 
-                // Note: ProcessFeed also uses puppeteer, but since we can't easily pass cookies/session
-                // through the service API, we'll keep descriptions as excerpts for now
-                // TO-DO: Enhance to fetch full content if using local connection
+                // Fetch full content for each post
+                const itemsWithContent = await pMap(
+                    items,
+                    async (item: any) => {
+                        try {
+                            const postApiUrl = `https://www.dcard.tw/service/api/v2/posts/${item.id}`;
+                            const postData = await fetchApiJson(postApiUrl, conn);
+                            if (postData?.content) {
+                                item.description = processContent(postData.content);
+                            }
+                        } catch {
+                            // keep excerpt on failure
+                        }
+                        return item;
+                    },
+                    { concurrency: 3 }
+                );
 
                 if (conn) {
                     await conn.browser.close();
                     conn = null;
                 }
 
-                return items;
+                return itemsWithContent;
             } catch (error) {
                 if (conn) {
                     await conn.browser.close();
@@ -157,7 +201,7 @@ async function handler(ctx) {
                 throw error;
             }
         },
-        10 * 60 // Cache for 10 minutes
+        30 * 60 // Cache for 30 minutes (longer due to full content fetch)
     );
 
     return {
