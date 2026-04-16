@@ -1692,6 +1692,7 @@ export type RoutePath =
   | `/kiro/blog`
   | `/kiro/changelog`
   | `/kisskiss/blog/:category?`
+  | `/kit/newsletter/:username`
   | `/komiic/comic/:id`
   | `/konachan/post/popular_recent/:period?`
   | `/konachan/sfw/post/popular_recent/:period?`

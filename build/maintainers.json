@@ -5169,6 +5169,9 @@
   "/kisskiss/blog/:category?": [
     "keocheung"
   ],
+  "/kit/newsletter/:username": [
+    "giveanornot"
+  ],
   "/komiic/comic/:id": [
     "NekoAria"
   ],
