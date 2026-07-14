@@ -24,7 +24,7 @@ export const route: Route = {
 };
 
 const realBrowserOption: Options = {
-    args: ['--start-maximized'],
+    args: ['--start-maximized', '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     turnstile: true,
     headless: false,
     customConfig: {
