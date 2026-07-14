@@ -1,4 +1,3 @@
-import pMap from 'p-map';
 import { connect, type Options } from 'puppeteer-real-browser';
 
 import { config } from '@/config';
@@ -49,6 +48,80 @@ function processContent(content: string): string {
     return body;
 }
 
+function normalizeStructuredData(input: any): any[] {
+    if (!input) {
+        return [];
+    }
+    if (Array.isArray(input)) {
+        return input.flatMap(normalizeStructuredData);
+    }
+    if (Array.isArray(input['@graph'])) {
+        return input['@graph'].flatMap(normalizeStructuredData);
+    }
+    return [input];
+}
+
+function decodeHtmlEntities(text: string): string {
+    return text
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#39;', "'");
+}
+
+function isSocialMediaPosting(item: any): boolean {
+    const type = item?.['@type'];
+    return type === 'SocialMediaPosting' || (Array.isArray(type) && type.includes('SocialMediaPosting'));
+}
+
+function imageList(image: any): string[] {
+    if (!image) {
+        return [];
+    }
+    const images = Array.isArray(image) ? image : [image];
+    return images
+        .map((entry) => {
+            if (typeof entry === 'string') {
+                return entry;
+            }
+            return entry?.url;
+        })
+        .filter(Boolean);
+}
+
+function extractPostsFromStructuredData(html: string) {
+    const matches = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+    const posts = matches.flatMap((match) => {
+        try {
+            return normalizeStructuredData(JSON.parse(decodeHtmlEntities(match[1].trim()))).filter(isSocialMediaPosting);
+        } catch {
+            return [];
+        }
+    });
+
+    return posts.map((post) => {
+        const author = post.author || {};
+        const images = imageList(post.image);
+        const text = post.text || '';
+        const imageHtml = images.map((url) => `<p><img src="${url}"></p>`).join('');
+        const description = `${text ? processContent(text) : ''}${imageHtml}`;
+        const link = post.url || post.mainEntityOfPage;
+        const id = String(link || '').match(/\/p\/(\d+)/)?.[1] ?? link;
+
+        return {
+            title: post.headline,
+            link,
+            description,
+            author: author.name || author.alternateName || 'Dcard',
+            pubDate: parseDate(post.datePublished),
+            updated: parseDate(post.dateModified || post.datePublished),
+            category: ['Dcard'],
+            id,
+        };
+    });
+}
+
 async function getPageWithRealBrowser(url: string, selector: string, conn: any | null, timeout = 30000) {
     try {
         if (conn) {
@@ -66,6 +139,22 @@ async function getPageWithRealBrowser(url: string, selector: string, conn: any |
                 // eslint-disable-next-line no-await-in-loop
                 await new Promise((r) => setTimeout(r, 1000));
             }
+            if (selector.includes('application/ld+json')) {
+                let hasPosts = false;
+                const structuredDataStartDate = Date.now();
+                while (!hasPosts && Date.now() - structuredDataStartDate < timeout) {
+                    try {
+                        // eslint-disable-next-line no-await-in-loop
+                        hasPosts = await page.evaluate(() => [...document.scripts].some((script) => script.type === 'application/ld+json' && script.textContent?.includes('SocialMediaPosting')));
+                    } catch {
+                        hasPosts = false;
+                    }
+                    if (!hasPosts) {
+                        // eslint-disable-next-line no-await-in-loop
+                        await new Promise((r) => setTimeout(r, 1000));
+                    }
+                }
+            }
             return await page.content();
         } else {
             const res = await fetch(`${config.puppeteerRealBrowserService}?url=${encodeURIComponent(url)}&selector=${encodeURIComponent(selector)}`);
@@ -77,29 +166,6 @@ async function getPageWithRealBrowser(url: string, selector: string, conn: any |
     }
 }
 
-async function fetchApiJson(url: string, conn: any | null, timeout = 15000): Promise<any> {
-    try {
-        if (conn) {
-            const page = await conn.browser.newPage();
-            try {
-                await page.goto(url, { timeout });
-                const text = await page.evaluate(() => document.querySelector('body > pre')?.textContent ?? '');
-                return text ? JSON.parse(text) : null;
-            } finally {
-                await page.close();
-            }
-        } else {
-            const res = await fetch(`${config.puppeteerRealBrowserService}?url=${encodeURIComponent(url)}&selector=${encodeURIComponent('body > pre')}`);
-            const json = await res.json();
-            const text = json.data?.at(0) || '';
-            const preMatch = text.match(/<pre[^>]*>([\s\S]*?)<\/pre>/);
-            return preMatch ? JSON.parse(preMatch[1]) : null;
-        }
-    } catch {
-        return null;
-    }
-}
-
 async function handler(ctx) {
     if (!config.puppeteerRealBrowserService && !config.chromiumExecutablePath) {
         throw new Error('PUPPETEER_REAL_BROWSER_SERVICE or CHROMIUM_EXECUTABLE_PATH is required to use this route.');
@@ -108,27 +174,22 @@ async function handler(ctx) {
     const { type = 'latest', section = 'posts' } = ctx.req.param();
 
     let link = 'https://www.dcard.tw/f';
-    let api = 'https://www.dcard.tw/service/api/v2';
     let title = 'Dcard - ';
 
     if (section !== 'posts' && section !== 'popular' && section !== 'latest') {
         link += `/${section}`;
-        api += `/forums/${section}`;
         title += `${section} - `;
     }
-    api += '/posts';
     if (type === 'popular') {
         link += '?latest=false';
-        api += '?popular=true';
         title += '熱門';
     } else {
         link += '?latest=true';
-        api += '?popular=false';
         title += '最新';
     }
 
     // Cache the entire fetch operation to reduce requests to Dcard
-    const cacheKey = `dcard:${section}:${type}`;
+    const cacheKey = `dcard:structured:${section}:${type}`;
     const items = await cache.tryGet(
         cacheKey,
         async () => {
@@ -145,60 +206,23 @@ async function handler(ctx) {
             }
 
             try {
-                // Try API directly first; fallback to homepage visit if blocked
-                let apiHtml = await getPageWithRealBrowser(`${api}&limit=20`, 'body > pre', conn, 30000);
-                if (!apiHtml || !apiHtml.includes('<pre')) {
-                    await getPageWithRealBrowser(link, '.layout_main_2x7k', conn, 30000);
-                    apiHtml = await getPageWithRealBrowser(`${api}&limit=20`, 'body > pre', conn, 30000);
-                }
-                if (!apiHtml) {
+                const html = await getPageWithRealBrowser(link, 'script[type="application/ld+json"]', conn, 30000);
+                const items = extractPostsFromStructuredData(html).filter((item) => item.title && item.link);
+
+                if (items.length === 0) {
                     if (conn) {
                         await conn.browser.close();
                         conn = null;
                     }
-                    throw new Error('Failed to fetch API data.');
+                    throw new Error('Failed to fetch Dcard structured data.');
                 }
-
-                // Extract JSON from pre tag
-                const preMatch = apiHtml.match(/<pre[^>]*>(.*?)<\/pre>/s);
-                const response = preMatch ? preMatch[1] : apiHtml;
-
-                const data = JSON.parse(response);
-                const items = data.map((item) => ({
-                    title: `「${item.forumName}」${item.title}`,
-                    link: `https://www.dcard.tw/f/${item.forumAlias}/p/${item.id}`,
-                    description: item.excerpt,
-                    author: `${item.school || '匿名'}．${item.gender === 'M' ? '男' : '女'}`,
-                    pubDate: parseDate(item.createdAt),
-                    category: [item.forumName, ...item.topics],
-                    forumAlias: item.forumAlias,
-                    id: item.id,
-                }));
-
-                // Fetch full content for each post
-                const itemsWithContent = await pMap(
-                    items,
-                    async (item: any) => {
-                        try {
-                            const postApiUrl = `https://www.dcard.tw/service/api/v2/posts/${item.id}`;
-                            const postData = await fetchApiJson(postApiUrl, conn);
-                            if (postData?.content) {
-                                item.description = processContent(postData.content);
-                            }
-                        } catch {
-                            // keep excerpt on failure
-                        }
-                        return item;
-                    },
-                    { concurrency: 3 }
-                );
 
                 if (conn) {
                     await conn.browser.close();
                     conn = null;
                 }
 
-                return itemsWithContent;
+                return items;
             } catch (error) {
                 if (conn) {
                     await conn.browser.close();
