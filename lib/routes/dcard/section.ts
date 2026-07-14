@@ -62,12 +62,7 @@ function normalizeStructuredData(input: any): any[] {
 }
 
 function decodeHtmlEntities(text: string): string {
-    return text
-        .replaceAll('&amp;', '&')
-        .replaceAll('&lt;', '<')
-        .replaceAll('&gt;', '>')
-        .replaceAll('&quot;', '"')
-        .replaceAll('&#39;', "'");
+    return text.replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&#39;', "'");
 }
 
 function isSocialMediaPosting(item: any): boolean {
