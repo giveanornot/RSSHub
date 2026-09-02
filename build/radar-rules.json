@@ -44960,6 +44960,19 @@
       }
     ]
   },
+  "gov.taipei": {
+    "_name": "臺北市立天文科學教育館",
+    "tam": [
+      {
+        "title": "天文新知",
+        "docs": "https://docs.rsshub.app/routes/government",
+        "source": [
+          "/News_Photo.aspx?n=EF86D8AF23B9A85B&sms=F32C4FF0AC5C2801"
+        ],
+        "target": "/tam/astronomy-news"
+      }
+    ]
+  },
   "tangshufang.com": {
     "_name": "唐书房",
     ".": [

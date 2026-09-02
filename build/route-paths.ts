@@ -2713,6 +2713,7 @@ export type RoutePath =
   | `/tailwindcss/blog`
   | `/taiwanmobile/rate-plans`
   | `/taiwannews/hot/:lang?`
+  | `/tam/astronomy-news`
   | `/tangshufang/:category?`
   | `/taobao/mysql/monthly`
   | `/taobao/zhongchou/:type?`
