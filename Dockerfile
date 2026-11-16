@@ -104,6 +104,7 @@ RUN \
             yarn config set registry https://registry.npmmirror.com && \
             pnpm config set registry https://registry.npmmirror.com ; \
         fi; \
+        apt-get update && apt-get install -yq --no-install-recommends unzip && \
         echo 'Downloading Chromium...' && \
         unset PUPPETEER_SKIP_DOWNLOAD && \
         corepack enable pnpm && \
